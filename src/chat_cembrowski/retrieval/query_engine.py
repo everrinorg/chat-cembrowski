@@ -82,7 +82,7 @@ SCORE_THRESHOLD = 0.30
 
 # The labels CLASSIFIER_PROMPT is allowed to emit. "cembrowski" is the default
 # and so is never matched for explicitly -- see `_resolve_label`.
-KNOWN_LABELS = ("hostile", "site", "medical", "general")
+KNOWN_LABELS = ("hostile", "site", "person", "medical", "general")
 
 _LABEL_WORD_RE = re.compile(r"[a-z]+")
 
@@ -281,9 +281,10 @@ class QueryEngine:
         `_route` picks the route (see there for how); this method generates the
         answer for whichever one it chose:
 
-        - "author" — a fuzzy hit on a name known to the corpus. Answers from
-          that person's bio plus recent works via metadata filters rather
-          than vector search, since author names are never embedded.
+        - "author" — classified "person" and a fuzzy hit on a name known to
+          the corpus. Answers from that person's bio plus recent works via
+          metadata filters rather than vector search, since author names are
+          never embedded.
         - "site" — classified "site" and retrieval cleared SCORE_THRESHOLD
           against `kind IN ("site", "document")`. Answers from the site/
           internal knowledge chunks `_route` already fetched.
@@ -368,18 +369,9 @@ class QueryEngine:
         Split out from `query_structured` so routing can be evaluated on its
         own -- see RouteDecision.
 
-        Classification runs before author matching for "hostile" and
-        "medical" (unlike the old routing, where an author-name hit
-        short-circuited classification entirely -- which is how a message
-        like "George Cembrowski is a fraud" used to bypass every guard and
-        land straight on the corpus route: it still can't, since hostile is
-        checked first here). For every other label, author-match still runs
-        before the label is trusted -- a question like "Tell me about Mark
-        Cervinski's work" can land on "general" from the classifier alone
-        (nothing about the wording says "corpus"), and losing the author
-        route for it would be its own regression. Measured: this is what it
-        takes to keep author routing at 4/4 while still closing the hostile
-        bypass.
+        The "author" route needs both a "person" label and a known author
+        name: the corpus authors are also its subject matter, so a name alone
+        ("Find the Cembrowski Carey chapter on...") never overrides the label.
         """
         history = history or []
         search_question = (
@@ -398,21 +390,20 @@ class QueryEngine:
                 route="nih", search_question=search_question, label=label
             )
 
-        # label is "general", "site", or "cembrowski" here -- all three are
-        # questions an author-name hit should be allowed to short-circuit.
-        matched_author = self._match_author(search_question)
-        if matched_author:
-            return RouteDecision(
-                route="author",
-                search_question=search_question,
-                label=label,
-                matched_author=matched_author,
-            )
+        # Checked after hostile/medical, so a hostile message about a person/author
+        # can't reach the author route.
+        if label == "person":
+            matched_author = self._match_author(search_question)
+            if matched_author:
+                return RouteDecision(
+                    route="author",
+                    search_question=search_question,
+                    label=label,
+                    matched_author=matched_author,
+                )
 
-        # No safety net in this direction, by design: a "general" label skips
-        # retrieval entirely. "cembrowski" and "site" both still have to earn
-        # their route by clearing SCORE_THRESHOLD below.
-        if label == "general":
+
+        if label == "general" and not self._match_author(search_question):
             return RouteDecision(
                 route="general", search_question=search_question, label=label
             )
@@ -435,7 +426,8 @@ class QueryEngine:
                 top_score=top_score,
             )
 
-        # label == "cembrowski": unfiltered search across the whole corpus.
+        # "cembrowski", plus "person"/"general" questions that fell through
+        # above: unfiltered search across the whole corpus.
         # Below SCORE_THRESHOLD falls through to "general" rather than NIH --
         # this is the fix for the old "couldn't find NIH information" dead
         # end on questions that were never medical to begin with.
@@ -501,8 +493,8 @@ class QueryEngine:
 
     def _classify(self, question: str) -> str:
         """
-        Classify a question as "cembrowski", "site", "medical", "general", or
-        "hostile" via a cheap LLM call.
+        Classify a question as "cembrowski", "site", "person", "medical",
+        "general", or "hostile" via a cheap LLM call.
 
         Defaults to "cembrowski" on any API failure or an unrecognized
         label — the retrieval-score check in `_route` still catches

@@ -45,6 +45,7 @@ data/catalog.csv
 # Keep only the placeholder in data/docs
 data/docs/*
 !data/docs/.gitkeep
+/data/authors
 
 extras/
 notes
